@@ -75,7 +75,8 @@ if [ -x "$VENV/bin/python" ]; then
   fi
   ff=$("$VENV/bin/python" -c 'import imageio_ffmpeg as m; print(m.get_ffmpeg_exe())' 2>/dev/null || true)
   # read the list whole: grep -q would close the pipe early, and pipefail then reads ffmpeg's SIGPIPE as a miss
-  encoders=$( [ -n "$ff" ] && "$ff" -hide_banner -encoders 2>/dev/null || true)
+  encoders=""
+  [ -n "$ff" ] && encoders=$("$ff" -hide_banner -encoders 2>/dev/null || true)
   if [[ $encoders == *libx264* ]]; then ok "static ffmpeg with libx264"; else miss "static ffmpeg with libx264"; fi
 fi
 
