@@ -1,0 +1,16 @@
+# MediaMTX, the local RTMP server the keeper publishes to and the relay and the browser read
+# from (rtmp :1935, WebRTC preview :8889, HLS :8888). install.sh fills in @MTX@.
+
+[Unit]
+Description=Nano Stream: MediaMTX (rtmp://127.0.0.1:1935/nano, preview :8889/nano/)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@MTX@
+ExecStart=@MTX@/mediamtx @MTX@/mediamtx.yml
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

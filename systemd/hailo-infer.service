@@ -1,0 +1,24 @@
+# The Hailo-8 vision daemon on 127.0.0.1:5911, as a systemd user unit.
+# install.sh fills in the @...@ paths and copies this to ~/.config/systemd/user/.
+# User-level: no root to install or restart it. Survives logout with `loginctl enable-linger`.
+
+[Unit]
+Description=Nano Stream: Hailo-8 vision daemon (yolov8s + plate detector + OCR, loopback :5911)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@STATE@
+Environment=HAILO_MODELS=@MODELS@
+Environment=HAILO_INFER_LOG=@STATE@/hailo_infer_server.log
+# hailort.log lands in the working directory; the daemon keeps one Device open so it stays
+# small, and warning keeps HailoRT's own chatter out of it
+Environment=HAILORT_LOGGER_LEVEL=warning
+# the daemon's own settings (HAILO_INFER_MIN_PLATE_PX, HAILO_INFER_OCR_SURE) go in this file, then restart
+EnvironmentFile=-@STATE@/hailo-infer.env
+ExecStart=@PY@ @APP@/hailo_infer_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

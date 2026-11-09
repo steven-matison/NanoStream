@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# nano-stream: run the Nano Stream pieces on a Jetson. One pid file and one log per piece.
+#
+#   nano-stream keeper [url]            the always-on encoder + mic + NANO STREAM card, publishing to url
+#                                       (default rtmp://127.0.0.1:1935/nano); KEEPER_ARGS="--audio plughw:<card>,0"
+#   nano-stream keeper-stop
+#   nano-stream keeper-restart          stop and start the keeper with the url and args it last ran with
+#   nano-stream mic <device|none>       swap the keeper's mic (e.g. plughw:2,0; arecord -l lists the cards)
+#   nano-stream start <source> [url]    source: a file, a directory/mount, or http://<mac>:8787/
+#   nano-stream next                    restart the renderer at the clip after the one playing
+#   nano-stream stop                    the renderer only; the keeper and the relay stay up
+#   nano-stream relay [from-url]        copy the local stream to X, no re-encode
+#   nano-stream relay-stop
+#   nano-stream agent-pin [cores] [nice]   hold the MiNiFi C++ agent to cores (default 4,5) at nice (default 15)
+#   nano-stream status | health
+#
+# With a keeper running, start hands it frames over a UNIX socket, so a renderer restart, a
+# skip or a crash never reaches the viewer. With no keeper and no url, start publishes straight
+# to X. The X key is read from ~/.x-stream.env (X_KEY=<key>, or the bare key on one line) and
+# is never printed.
+#
+# Environment (all optional):
+#   NANOSTREAM_PY      the python with the app's packages     from ~/.nanostream/env, else ~/.nanostream/venv
+#   NANOSTREAM_RUN     pid files, logs, the keeper socket     /tmp
+#   NANOSTREAM_CACHE   where http clips are downloaded        /tmp/nano-stream-cache
+#   HAILO_INFER_URL    the Hailo daemon                       http://127.0.0.1:5911
+#   X_INGEST           X's RTMPS ingest                       rtmps://a.live.x.com:443/x
+#   X_STREAM_ENV       the file holding the X key             ~/.x-stream.env
+#   NANO_STREAM_ARGS   extra renderer options, e.g. "--start-at 250123", "--hours 9-15", "--no-minifi"
+#   KEEPER_ARGS        extra keeper options, e.g. "--audio plughw:2,0", "--width 1920 --height 1080"
+
+# The renderer, the keeper and the relay append to the log their wrapper loop also writes to.
+# shellcheck disable=SC2094
+set -u
+
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# install.sh records a reused venv here; a variable set in the environment still wins
+# shellcheck source=/dev/null
+[ -f "$HOME/.nanostream/env" ] && . "$HOME/.nanostream/env"
+APP="$(cd "$HERE/../nanostream" && pwd)"
+PY="${NANOSTREAM_PY:-$HOME/.nanostream/venv/bin/python}"
+RUN="${NANOSTREAM_RUN:-/tmp}"
+export NANOSTREAM_CACHE="${NANOSTREAM_CACHE:-/tmp/nano-stream-cache}"
+HAILO="${HAILO_INFER_URL:-http://127.0.0.1:5911}"
+X_INGEST="${X_INGEST:-rtmps://a.live.x.com:443/x}"
+X_ENV="${X_STREAM_ENV:-$HOME/.x-stream.env}"
+LOCAL_URL="rtmp://127.0.0.1:1935/nano"
+
+PIDFILE=$RUN/nano-stream.pid   LOG=$RUN/nano-stream.log
+KPIDFILE=$RUN/nano-keeper.pid  KLOG=$RUN/nano-keeper.log  KSOCK=$RUN/nano-keeper.sock
+RPIDFILE=$RUN/nano-relay.pid   RLOG=$RUN/nano-relay.log
+
+now() { date -u +%FT%TZ; }
+
+alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+descendants() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do echo "$c"; descendants "$c"; done
+}
+
+# Stop the process tree under a pid file, found by pid only: no name matching, so an SSH
+# shell whose command line happens to name a script is never hit.
+stop_tree() {
+  local pidfile=$1 c
+  local -a tree left
+  tree=("$(cat "$pidfile")"); rm -f "$pidfile"
+  mapfile -t -O 1 tree < <(descendants "${tree[0]}")
+  kill -TERM "${tree[@]}" 2>/dev/null
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    left=()
+    for c in "${tree[@]}"; do kill -0 "$c" 2>/dev/null && left+=("$c"); done
+    [ "${#left[@]}" -eq 0 ] && return 0
+    sleep 0.5
+  done
+  kill -KILL "${left[@]}" 2>/dev/null
+}
+
+x_url() {
+  local key=""
+  [ -f "$X_ENV" ] || { echo "no $X_ENV (put X_KEY=<key> in it)" >&2; return 1; }
+  if grep -q "^X_KEY=" "$X_ENV"; then
+    key=$(sed -n 's/^X_KEY=//p' "$X_ENV" | head -1 | tr -d "[:space:]\"'")
+  else
+    key=$(tr -d '[:space:]' < "$X_ENV")
+  fi
+  [ -n "$key" ] || { echo "empty key in $X_ENV" >&2; return 1; }
+  echo "$X_INGEST/$key"
+}
+
+ffmpeg_static() { "$PY" -c "import imageio_ffmpeg as m; print(m.get_ffmpeg_exe())" 2>/dev/null || command -v ffmpeg; }
+
+keeper_start() {
+  local url=$1 args=$2
+  if alive "$KPIDFILE"; then echo "keeper already running, pid $(cat "$KPIDFILE")"; return 1; fi
+  printf '%s' "$url" > "$RUN/nano-keeper.url"
+  printf '%s' "$args" > "$RUN/nano-keeper.args"
+  local -a extra=()
+  read -r -a extra <<< "$args"
+  : > "$KLOG"
+  (
+    while true; do
+      "$PY" "$APP/nano_keeper.py" --url "$url" --sock "$KSOCK" --log "$KLOG" --daemon "$HAILO" "${extra[@]}"
+      echo "[$(now)] keeper exited rc=$?; restarting in 1 s" >> "$KLOG"
+      [ -f "$KPIDFILE" ] || exit 0
+      sleep 1
+    done
+  ) >> "$KLOG" 2>&1 < /dev/null &
+  echo $! > "$KPIDFILE"
+  echo "keeper started, pid $(cat "$KPIDFILE"), $url, socket $KSOCK, log $KLOG"
+}
+
+keeper_restart() {
+  local url args
+  url=$(cat "$RUN/nano-keeper.url" 2>/dev/null || echo "$LOCAL_URL")
+  args=${1-$(cat "$RUN/nano-keeper.args" 2>/dev/null)}
+  local t0=$SECONDS
+  alive "$KPIDFILE" && stop_tree "$KPIDFILE"
+  keeper_start "$url" "$args" || return 1
+  echo "keeper restarted in about $((SECONDS - t0)) s (X drops the source at about 10 s)"
+}
+
+case "${1:-}" in
+  start)
+    SRC="${2:?usage: nano-stream start <source> [url]}"
+    URL="${3:-}"
+    if [ -z "$URL" ] && alive "$KPIDFILE"; then
+      URL="unix:$KSOCK"          # the keeper owns the encoder; the renderer hands it frames
+    fi
+    if [ -z "$URL" ]; then
+      URL=$(x_url) || exit 2
+    fi
+    if alive "$PIDFILE"; then echo "already running, pid $(cat "$PIDFILE")"; exit 1; fi
+    curl -sf -m 3 "$HAILO/health" >/dev/null || { echo "the Hailo daemon is not answering at $HAILO"; exit 2; }
+    EXTRA="${NANO_STREAM_ARGS:-}"
+    echo "$SRC" > "$RUN/nano-stream.source"
+    printf '%s' "${3:-}" > "$RUN/nano-stream.url"     # only an explicit url; next derives the rest again
+    printf '%s' "$EXTRA" > "$RUN/nano-stream.args"
+    read -r -a XA <<< "$EXTRA"
+    : > "$LOG"
+    (
+      while true; do
+        "$PY" "$APP/render_stream.py" --source "$SRC" --url "$URL" --log "$LOG" --daemon "$HAILO" "${XA[@]}"
+        rc=$?
+        if [ "$rc" -eq 0 ]; then       # the end of the list without --loop: stay stopped
+          echo "[$(now)] renderer finished the list; stopped" >> "$LOG"; rm -f "$PIDFILE"; exit 0
+        fi
+        echo "[$(now)] renderer exited rc=$rc; restarting in 5 s" >> "$LOG"
+        [ -f "$PIDFILE" ] || exit 0
+        sleep 5
+      done
+    ) >> "$LOG" 2>&1 < /dev/null &
+    echo $! > "$PIDFILE"
+    echo "started, pid $(cat "$PIDFILE"), log $LOG"
+    ;;
+  stop)
+    if [ -f "$PIDFILE" ]; then stop_tree "$PIDFILE"; echo "stopped"; else echo "not running"; fi
+    ;;
+  next)
+    CUR=$(grep -oiE "playing [^ ]+\.(mp4|mov|mkv|m4v|ts|avi)" "$LOG" 2>/dev/null | tail -1 | sed "s/^playing //")
+    [ -n "$CUR" ] || { echo "nothing playing"; exit 1; }
+    # an http clip is logged by its url name; the cache file and --start-at use the decoded one
+    CUR=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote(sys.argv[1]))' "$CUR")
+    SRC=$(cat "$RUN/nano-stream.source" 2>/dev/null)
+    URL=$(cat "$RUN/nano-stream.url" 2>/dev/null)
+    [ -n "$SRC" ] || { echo "no source recorded"; exit 1; }
+    ARGS=$(sed -E 's/--(start-at|skip) +[^ ]+//g' "$RUN/nano-stream.args" 2>/dev/null)
+    "$0" stop >/dev/null
+    rm -f "${NANOSTREAM_CACHE:?}/$CUR"
+    # start-at sorts >=, so the name plus a "~" lands on the clip after it
+    if [ -n "$URL" ]; then NANO_STREAM_ARGS="$ARGS --start-at ${CUR}~" "$0" start "$SRC" "$URL"
+    else NANO_STREAM_ARGS="$ARGS --start-at ${CUR}~" "$0" start "$SRC"; fi
+    echo "skipped $CUR"
+    ;;
+  keeper)
+    keeper_start "${2:-$LOCAL_URL}" "${KEEPER_ARGS:-}"
+    ;;
+  keeper-stop)
+    if [ -f "$KPIDFILE" ]; then stop_tree "$KPIDFILE"; echo "keeper stopped"; else echo "keeper not running"; fi
+    ;;
+  keeper-restart)
+    if [ -n "${KEEPER_ARGS+x}" ]; then keeper_restart "$KEEPER_ARGS"; else keeper_restart; fi
+    ;;
+  mic)
+    DEV="${2:?usage: nano-stream mic <plughw:N,0|none>}"
+    ARGS=$(sed -E 's/--audio +[^ ]+//g' "$RUN/nano-keeper.args" 2>/dev/null)
+    [ "$DEV" = none ] || ARGS="$ARGS --audio $DEV"
+    keeper_restart "$ARGS"
+    ;;
+  relay)
+    FROM="${2:-$LOCAL_URL}"
+    TO=$(x_url) || exit 2
+    if alive "$RPIDFILE"; then echo "relay already running, pid $(cat "$RPIDFILE")"; exit 1; fi
+    FF=$(ffmpeg_static)
+    : > "$RLOG"
+    # The static ffmpeg resolves no hostnames on L4T ("Failed to resolve hostname: System
+    # error"), so the ingest host is resolved here with the system resolver and ffmpeg gets
+    # the IP, with the hostname kept for the TLS SNI (-verifyhost) and the RTMP tcUrl.
+    HOST=$(printf '%s' "$X_INGEST" | sed -E 's#^[a-z]+://([^/:]+).*#\1#')
+    APPNAME=$(printf '%s' "$X_INGEST" | sed -E 's#^[a-z]+://[^/]+/##')
+    (
+      while true; do
+        IP=$(getent ahostsv4 "$HOST" | awk 'NR==1{print $1}')
+        if [ -z "$IP" ]; then
+          echo "[$(now)] cannot resolve $HOST; retrying in 10 s" >> "$RLOG"; sleep 10; continue
+        fi
+        # -c copy: the stream is already x264 + AAC, nothing is re-encoded here
+        "$FF" -hide_banner -loglevel warning -stats -re -rtmp_live live -i "$FROM" -c copy \
+          -verifyhost "$HOST" -rtmp_tcurl "rtmps://$HOST:443/$APPNAME" -f flv "${TO/$HOST/$IP}"
+        echo "[$(now)] relay exited rc=$?; reconnecting in 1 s" >> "$RLOG"
+        [ -f "$RPIDFILE" ] || exit 0
+        sleep 1    # a publisher restart is 2-3 s; X drops the source past ~10 s
+      done
+    ) >> "$RLOG" 2>&1 < /dev/null &
+    echo $! > "$RPIDFILE"
+    echo "relay started, pid $(cat "$RPIDFILE"), $FROM -> $X_INGEST/<key>, log $RLOG"
+    ;;
+  relay-stop)
+    if [ -f "$RPIDFILE" ]; then stop_tree "$RPIDFILE"; echo "relay stopped"; else echo "relay not running"; fi
+    ;;
+  agent-pin)
+    CORES="${2:-4,5}"
+    NICE="${3:-15}"
+    P="${MINIFI_AGENT_PID:-$(pgrep -x minifi | head -1)}"
+    [ -n "$P" ] || { echo "no MiNiFi C++ agent running (process name minifi); set MINIFI_AGENT_PID"; exit 1; }
+    # -a reaches every thread; renice -p takes one thread id, so every task id is passed
+    taskset -a -p -c "$CORES" "$P" >/dev/null || exit 1
+    TASKS=("/proc/$P/task/"*)
+    TASKS=("${TASKS[@]##*/}")
+    renice -n "$NICE" -p "${TASKS[@]}" >/dev/null || exit 1
+    echo "agent $P: ${#TASKS[@]} threads on cores $CORES at nice $NICE"
+    ;;
+  health)
+    curl -s -m 3 "$HAILO/health" || { echo "the Hailo daemon is not answering at $HAILO"; exit 2; }
+    echo
+    ;;
+  status)
+    if alive "$KPIDFILE"; then
+      echo "keeper running, pid $(cat "$KPIDFILE"), args: $(cat "$RUN/nano-keeper.args" 2>/dev/null)"
+      grep -E "^\[" "$KLOG" | tail -1
+      tail -c 400 "$KLOG" | tr '\r' '\n' | grep -E '^frame=' | tail -1
+    else
+      echo "keeper not running"
+    fi
+    if alive "$PIDFILE"; then
+      echo "renderer running, pid $(cat "$PIDFILE"), source $(cat "$RUN/nano-stream.source" 2>/dev/null)"
+      tail -c 600 "$LOG" | tr '\r' '\n' | grep -E '^(frame=|\[)' | tail -2 | sed -E 's#/x/[^ ]*#/x/<key>#g'
+      curl -s -m 3 "$HAILO/health" | "$PY" -c 'import sys,json; d=json.load(sys.stdin); print("hailo die", d.get("chip_temp_c"), "C;", d.get("counters"))' 2>/dev/null
+    else
+      echo "renderer not running"
+    fi
+    if alive "$RPIDFILE"; then
+      echo "relay running, pid $(cat "$RPIDFILE")"
+      tail -c 400 "$RLOG" | tr '\r' '\n' | grep -E '^(frame=|\[)' | tail -2 | sed -E 's#/x/[^ ]*#/x/<key>#g'
+    else
+      echo "relay not running"
+    fi
+    ;;
+  *)
+    echo "usage: nano-stream keeper [url] | keeper-stop | keeper-restart | mic <dev|none> |"
+    echo "       start <source> [url] | next | stop | relay [from-url] | relay-stop |"
+    echo "       agent-pin [cores] [nice] | status | health"
+    exit 64
+    ;;
+esac

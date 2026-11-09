@@ -1,0 +1,7 @@
+# The app's Python packages, on top of HailoRT's own wheel (hailort 4.24, see the README).
+# Versions are the ones the reference Jetson runs.
+opencv-python-headless>=4.8,<5
+numpy>=1.26
+pillow>=10
+rapidocr-onnxruntime==1.4.4
+imageio-ffmpeg>=0.5

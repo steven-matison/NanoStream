@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck bin/nano-stream install.sh mac/serve-clips.sh mac/install-launchd.sh
+      - name: bash -n
+        run: for f in bin/nano-stream install.sh mac/*.sh; do bash -n "$f"; done
+      - name: ruff
+        run: pipx run ruff check .
+
+  test:
+    # no Jetson and no Hailo on a hosted runner: the pure parts, the wrapper and the installer's check
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: packages
+        run: pip install "opencv-python-headless>=4.8,<5" numpy pillow pytest
+      - name: pytest
+        run: pytest -q
+      - name: wrapper usage
+        run: bin/nano-stream || [ $? -eq 64 ]
+      - name: installer check mode
+        run: ./install.sh --check
