@@ -158,15 +158,26 @@ Renderer options go in `NANO_STREAM_ARGS` before `start`:
 | `--loop` | off | start over at the end of the list |
 | `--mask-hud pdr` | `pdr` | black out the burned-in telemetry before inference (the picture keeps it); `none` for clean footage |
 | `--width 1920 --bitrate 6000k` | 1280, 3500k | 1080p; give the keeper the same with `KEEPER_ARGS="--width 1920 --height 1080 --bitrate 6000k"` |
+| `--fps F`, `--preset P` | 30, `veryfast` | the stream's frame rate and x264 preset; give the keeper the same in `KEEPER_ARGS` |
+| `--min-score S` | 0.4 | the lowest box score asked of the daemon, on `/detect` and `/plates` |
 | `--plates-every N` | 10, or 30 with the bar | the plate pass on every Nth inference pass; the rest are detection only |
+| `--records <file>` | | also append one JSON record per plate pass to this file |
 | `--no-minifi` | bar on | no MiNiFi bar and no clips handed to the agent |
 | `--lookahead N` | 2 | clips downloaded ahead of the one playing, one at a time, and handed to the agent as each download finishes |
+| `--fetch-retries N` | 4 | tries at a clip's download before it is skipped; a 404 skips it at once |
+| `--minifi-fps F` | 0.25 | the agent flow's Frames Per Second. The sync hold counts the frames a clip should have by it, so keep it equal to the flow's ([The MiNiFi bar](#the-minifi-bar)) |
 | `--minifi-cores 4,5` | 4,5 | cores the agent is held to while a clip plays. It gets every core while the picture waits on its scores. `none` leaves it alone. Re-applied every 2 s |
 | `--minifi-nice N` | 15 | lowest priority the agent's threads run at. The renderer only raises it |
 | `--minifi-sync S`, `--minifi-wait T` | 0.9, 900 | hold a clip until the agent has scored S of it, for T seconds at most; `--minifi-sync 0` never waits |
+| `--minifi-clips`, `--minifi-meta`, `--minifi-out` | `/tmp/minifi-detect/` `clips`, `meta`, `out` | the agent's three folders, for a flow built with another work folder |
+| `--out-keep-min M` | 20 | minutes an annotated JPEG the agent wrote during this run is kept; 0 keeps all |
 | `--tune none` | `zerolatency` | x264 with B-frames and lookahead back, for a better picture at the same bitrate with a little more encoder delay and CPU; give the keeper the same in `KEEPER_ARGS` |
+| `--stall S` | 8 | seconds the encoder may refuse frames before it is replaced |
+| `--intro S` | 3 | seconds of the NANO STREAM card before the first clip |
 | `--cache-keep-h H` | 24 | on start, drop cached clips older than H hours and every half-written `.part` |
 | `--audio plughw:N,0` | silent | a mic on the renderer's own encoder, when it runs without a keeper |
+
+`nano-stream start` sets `--source`, `--url`, `--log` and `--daemon` itself, and `--cache` follows `NANOSTREAM_CACHE` ([Configuration](#configuration)).
 
 ## The MiNiFi bar
 
@@ -181,6 +192,8 @@ The bar needs a MiNiFi C++ 2.26.09 agent on the same Jetson running the flow fro
 The renderer keeps two clips ahead of the one playing (`--lookahead 2`). Downloads run one at a time, and each clip is handed to the agent as soon as its download finishes, so the agent is scoring the next clips while one plays. At 0.25 fps a 10-minute clip is 150 frames, and the agent scores about 1.8 s per frame beside the stream.
 
 Before every clip plays, the renderer checks that the agent has scored 90 % of it (`--minifi-sync 0.9`). If not, it holds on the card ("MiNiFi is scoring the next clip", with a frame count) until it has, or for `--minifi-wait` seconds at most (900). With two clips ahead that hold is usually over before the clip is reached. A short clip in front of a long one can still trip it. When the agent is down there is no wait. Any MiNiFi C++ process on the box counts as the agent, so with an agent running some other flow pass `--no-minifi`, or every clip waits out `--minifi-wait` on the card. A restarted agent first finishes the frames it had queued when it stopped, from whatever clips those were, and the card shows which clip it is on. Drain that backlog before a show, or the first clip waits for it. The bar's state chip reads `IN SYNC`, `BEHIND <n>s`, `AHEAD <n>s`, `PREV CLIP` or `NEXT CLIP`, `QUEUED`, or `AGENT DOWN`.
+
+The hold counts the frames a clip should have at `--minifi-fps` (0.25), so that has to match the flow's Frames Per Second. The flow repo's `conf/config.yml` is its bench default, 1 fps. `python3 flow/build_flow.py --fps 0.25` rewrites it at 0.25; on an EFM class, `python3 flow/efm_flow.py set extract-frames "Frames Per Second=0.25"` and publish. A flow faster than `--minifi-fps` clears the hold early (a 1 fps flow clears it with under a quarter of the clip's frames scored), and the bar then trails the picture. A slower one never reaches the count, so every clip waits out `--minifi-wait`.
 
 The links are tracked in `clips/.nanostream-links`. A link left by a run that was killed is either adopted (its cache copy is still there) or removed on the next start (it was the clip's last copy). A clip put in `clips/` by hand is never touched.
 
