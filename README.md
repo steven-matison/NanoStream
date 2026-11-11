@@ -201,7 +201,9 @@ Six cores do not hold the stream, the agent and a desktop browser at once. Keep 
 
 ## The Mac source
 
-`mac/serve-clips.sh <folder> [port]` is `python3 -m http.server` on the folder, bound to every interface. `mac/install-launchd.sh` runs it as a per-user LaunchAgent: it starts at login, waits for the drive if it is not mounted yet, restarts the server if it dies, and holds the Mac awake with `caffeinate -i` while it serves.
+`mac/serve-clips.sh <folder> [port]` is `python3 -m http.server` on the folder, bound to every interface. `mac/install-launchd.sh` runs it as a per-user LaunchAgent: it starts at login, waits for the drive if it is not mounted yet, restarts the server if it dies, and holds off idle sleep with `caffeinate -i` while it serves.
+
+**Keep the lid open.** Closing it sleeps the Mac even on AC power with `caffeinate` running (`pmset -g log`: `Entering Sleep state due to 'Clamshell Sleep'`), and the Jetson's next fetch fails until the lid opens.
 
 ```bash
 bash mac/install-launchd.sh "/Volumes/<drive>/<clips folder>" 8787
@@ -209,7 +211,9 @@ bash mac/install-launchd.sh --status
 bash mac/install-launchd.sh --uninstall
 ```
 
-The log is `~/Library/Logs/nanostream-clips.log`. On the first start macOS may ask to let `bash` and `python3` read the external drive; allow it, or the server lists an empty folder.
+The log is `~/Library/Logs/nanostream-clips.log`. The installer copies `serve-clips.sh` to `~/Library/Application Support/NanoStream/` and the agent runs that copy, because macOS won't let a launchd job run a script from `~/Documents`, `~/Desktop` or `~/Downloads`, where a clone often sits (exit 126, `Operation not permitted`).
+
+**Give `/usr/bin/caffeinate` Full Disk Access once, or the server can't read the drive.** macOS charges the agent's file access to `caffeinate`, the program launchd starts, and never shows a prompt for a built-in binary: it just denies it. The log then reads `serving 0 clip(s)` and python3 dies with `Fatal Python error: pymain_compute_path0`. In System Settings, Privacy & Security, Full Disk Access, click +, press ⌘⇧G, enter `/usr/bin/caffeinate`, click Open, and leave its toggle on. The agent retries every 10 s, so it starts serving on its own within seconds. Anything else run under `caffeinate` gets the same access.
 
 The Mac is in the loop because the dashcam drive is HFS+, and L4T ships no `hfsplus` module. A FAT, exFAT or NTFS drive plugged into the Jetson works too: `nano-stream start /media/$USER/<label>`. With the MiNiFi bar on, each clip from a mount is copied into the agent's folder in the background, since a hard link cannot cross filesystems.
 
