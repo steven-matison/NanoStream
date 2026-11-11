@@ -81,6 +81,7 @@ VEHICLES = {"car", "truck", "bus", "motorcycle"}
 ORANGE, GREEN, WHITE = (0, 140, 255), (60, 220, 0), (255, 255, 255)
 NANO_GREEN = (90, 220, 118)
 BAND_H = 40
+FETCH_BLOCK = 4 * 1024 * 1024     # one synced write of a download; a read waits behind one at most
 
 
 # the top band's counter slots, fixed so the band never reflows: (label, Hailo labels, colour).
@@ -844,24 +845,28 @@ def main():
             time.sleep(5)
 
     def fetch_body(r, local, prog):
-        """Write the clip, flushing to disk every 32 MB. Left to the page cache, a
-        1.4 GB download goes to the eMMC in one burst when it ends, and reads of
-        the clip on screen stall behind it long enough to drop frames."""
-        unsynced = 0
+        """Write the clip in 4 MB blocks, each one on the eMMC before the next is
+        read. Left to the page cache, a 1.4 GB download goes to disk in one burst
+        when it ends. Synced every 32 MB and written flat out, it held the eMMC
+        busy for the whole download, one 3 s write after another, and the clip
+        on screen waited behind them: the keeper showed the card for 3.6 and
+        4.3 s. So a block is small enough that a read waits a fraction of a
+        second for it, and while a clip is playing the download rests after each
+        block for twice the time the block took to write, which leaves the eMMC
+        idle two thirds of the time. A clip fetched ahead has minutes to arrive.
+        With nothing playing the picture is waiting on this clip: no rest."""
         with open(local + ".part", "wb") as f:
             while True:
-                chunk = r.read(4 * 1024 * 1024)
+                chunk = r.read(FETCH_BLOCK)
                 if not chunk:
                     break
+                t0 = time.perf_counter()
                 f.write(chunk)
+                f.flush()
+                os.fdatasync(f.fileno())
                 prog["bytes"] += len(chunk)
-                unsynced += len(chunk)
-                if unsynced >= 32 * 1024 * 1024:
-                    f.flush()
-                    os.fdatasync(f.fileno())
-                    unsynced = 0
-            f.flush()
-            os.fdatasync(f.fileno())
+                if playing["local"]:
+                    time.sleep(min(2 * (time.perf_counter() - t0), 2.0))
 
     def cached(url):
         """A complete copy already in the cache (same size as the server's), left
