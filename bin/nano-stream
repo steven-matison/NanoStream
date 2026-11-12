@@ -227,7 +227,11 @@ case "${1:-}" in
     taskset -a -p -c "$CORES" "$P" >/dev/null || exit 1
     TASKS=("/proc/$P/task/"*)
     TASKS=("${TASKS[@]##*/}")
-    renice -n "$NICE" -p "${TASKS[@]}" >/dev/null || exit 1
+    if ! renice -n "$NICE" -p "${TASKS[@]}" >/dev/null 2>&1; then
+      # lowering a nice needs root; the cores are set either way
+      echo "agent $P: ${#TASKS[@]} threads on cores $CORES; nice left at $(ps -o ni= -p "$P" | tr -d ' ') (only root can lower it to $NICE)"
+      exit 1
+    fi
     echo "agent $P: ${#TASKS[@]} threads on cores $CORES at nice $NICE"
     ;;
   health)

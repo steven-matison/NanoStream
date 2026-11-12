@@ -77,6 +77,24 @@ def test_mic_swap_keeps_the_other_args(tmp_path):
         run(env, "keeper-stop")
 
 
+def test_agent_pin_says_once_that_it_cannot_lower_the_nice(tmp_path):
+    if os.geteuid() == 0:
+        return                                           # root can lower it: nothing to say
+    env, _ = fake_env(tmp_path)
+    agent = subprocess.Popen(["nice", "-n", "15", "sleep", "60"])
+    try:
+        time.sleep(0.3)
+        core = str(sorted(os.sched_getaffinity(0))[0])
+        r = run({**env, "MINIFI_AGENT_PID": str(agent.pid)}, "agent-pin", core, "0")
+        assert r.returncode == 1 and r.stderr == ""
+        assert r.stdout.count("\n") == 1 and "nice left at 15" in r.stdout
+        assert os.sched_getaffinity(agent.pid) == {int(core)}
+        r = run({**env, "MINIFI_AGENT_PID": str(agent.pid)}, "agent-pin", core, "19")
+        assert r.returncode == 0 and "at nice 19" in r.stdout
+    finally:
+        agent.kill()
+
+
 def test_end_of_list_stops_and_next_reads_the_logged_name(tmp_path):
     import http.server
     import threading
