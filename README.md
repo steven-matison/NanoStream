@@ -67,7 +67,7 @@ Every frame carries three overlays, all drawn on the Jetson:
 |---|---|---|
 | Detections | on the picture | the Hailo-8's boxes with filled label chips; plate boxes in green, with the text when a plate is big enough to read |
 | The band | across the top | `NANO STREAM` and the hardware, then nine counters (PERSON, CAR, TRUCK, BUS, BIKE, LIGHT, SIGN, OTHER, PLATE): big, the boxes on screen now; small, the objects seen this run; the clock and the clip on the right |
-| The health panel | top left, solid | Hailo die, CPU and GPU temperature with load and clock, board power from the INA3221 `VDD_IN` rail, RAM, fan duty and rpm, stream fps, inference rate, two-minute sparklines; temperatures turn amber and red as they heat |
+| The health panel | top left, solid | Hailo die and CPU temperature, CPU load and clock, board power from the INA3221 `VDD_IN` rail, RAM, fan duty and rpm, stream fps, inference rate, two-minute sparklines; temperatures turn amber and red as they heat |
 | The MiNiFi bar | along the bottom | the C++ agent's images scored, seconds per image, CPU and RSS, its object counters for the frame at the playhead, the Places365 scene, and a timeline ticked at every frame it has scored |
 
 The panel is solid on purpose: it sits over the dashcam's own speed readout and hides it.

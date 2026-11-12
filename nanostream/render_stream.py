@@ -285,9 +285,10 @@ def post(url, jpg, timeout=10):
 
 class SysStats:
     """Jetson health, sampled once a second on its own thread from sysfs and
-    /proc: thermal zones by type, the INA3221 rails, GPU load, CPU load and
-    clock, RAM, the fan. Nothing here touches the Hailo; its die temperature
-    comes back in every daemon reply."""
+    /proc: thermal zones by type, the INA3221 rails, CPU load and clock, RAM,
+    the fan. The Orin's GPU is not sampled: nothing in the stream runs on it.
+    Nothing here touches the Hailo; its die temperature comes back in every
+    daemon reply."""
 
     def __init__(self, keep=120):
         self.keep = keep
@@ -318,7 +319,7 @@ class SysStats:
     def _run(self):
         while True:
             v = {}
-            for key, zone in (("cpu_c", "cpu-thermal"), ("gpu_c", "gpu-thermal"), ("tj_c", "tj-thermal")):
+            for key, zone in (("cpu_c", "cpu-thermal"), ("tj_c", "tj-thermal")):
                 v[key] = self._read(self._zones.get(zone, "/nonexistent"), 1000.0)
             try:
                 f = open("/proc/stat").readline().split()[1:]
@@ -331,8 +332,6 @@ class SysStats:
             except (OSError, ValueError):
                 pass
             v["cpu_ghz"] = self._read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", 1e6)
-            g = self._read("/sys/devices/platform/gpu.0/load", 10.0)
-            v["gpu_pct"] = g
             try:
                 mi = {ln.split(":")[0]: int(ln.split()[1]) for ln in open("/proc/meminfo")}
                 v["ram_used_gb"] = (mi["MemTotal"] - mi["MemAvailable"]) / 1048576
@@ -383,8 +382,9 @@ def _spark(img, vals, x, y, w, h, col, lo=None, hi=None):
 
 def metrics_panel(img, sysv, hist, rates):
     """The health panel, top left, over the PDR's speed readout (which it
-    hides on purpose): Hailo die, CPU, GPU, power, RAM, fan, stream and
-    inference rates. Text colours turn amber and red with the heat."""
+    hides on purpose): Hailo die, CPU, power, RAM, fan, stream and inference
+    rates, six rows spaced to fill the height the readout needs covered. Text
+    colours turn amber and red with the heat."""
     x0, y0, w, h = 0, BAND_H + 1, 330, 214
     img[y0:y0 + h, x0:x0 + w] = (22, 12, 8)    # solid: the PDR speed underneath stays hidden
     cv2.line(img, (x0 + w, y0), (x0 + w, y0 + h), NANO_GREEN, 1)
@@ -395,7 +395,7 @@ def metrics_panel(img, sysv, hist, rates):
         return "--" if val is None else f"{val:{spec}}{unit}"
 
     def row(i, label, value, col=WHITE, extra="", extra_col=G):
-        y = y0 + 26 + i * 24
+        y = y0 + 28 + i * 28
         cv2.putText(img, label, (x0 + 12, y), F, 0.45, G, 1, cv2.LINE_AA)
         cv2.putText(img, value, (x0 + 92, y), F, S, col, 1, cv2.LINE_AA)
         if extra:
@@ -408,15 +408,13 @@ def metrics_panel(img, sysv, hist, rates):
     c = sysv.get("cpu_c")
     row(1, "CPU", fmt(c, ".1f", " C"), _heat(c, 75, 90),
         f"{fmt(sysv.get('cpu_pct'), '.0f', '%')}  {fmt(sysv.get('cpu_ghz'), '.2f', ' GHz')}")
-    c = sysv.get("gpu_c")
-    row(2, "GPU", fmt(c, ".1f", " C"), _heat(c, 75, 90), f"{fmt(sysv.get('gpu_pct'), '.0f', '%')} load")
     pw = sysv.get("power_w")
-    y = row(3, "POWER", fmt(pw, ".1f", " W"), WHITE)
+    y = row(2, "POWER", fmt(pw, ".1f", " W"), WHITE)
     _spark(img, hist["power"], x0 + 176, y - 12, 140, 14, NANO_GREEN, 5, 25)
-    row(4, "RAM", f"{fmt(sysv.get('ram_used_gb'), '.1f')} / {fmt(sysv.get('ram_total_gb'), '.1f')} GB", WHITE,
+    row(3, "RAM", f"{fmt(sysv.get('ram_used_gb'), '.1f')} / {fmt(sysv.get('ram_total_gb'), '.1f')} GB", WHITE,
         f"fan {fmt(sysv.get('fan_pct'), '.0f', '%')} {fmt(sysv.get('fan_rpm'), '.0f', ' rpm')}")
-    row(5, "STREAM", fmt(rates.get("fps"), ".1f", " fps"), WHITE, f"x264 {rates.get('mode', '')}")
-    row(6, "INFER", fmt(rates.get("ips"), ".0f", " /s"), WHITE, f"{fmt(rates.get('ms'), '.0f', ' ms')} last")
+    row(4, "STREAM", fmt(rates.get("fps"), ".1f", " fps"), WHITE, f"x264 {rates.get('mode', '')}")
+    row(5, "INFER", fmt(rates.get("ips"), ".0f", " /s"), WHITE, f"{fmt(rates.get('ms'), '.0f', ' ms')} last")
     cv2.putText(img, f"25W mode   Tj {fmt(sysv.get('tj_c'), '.1f', ' C')}   up {rates.get('up', '')}",
                 (x0 + 12, y0 + h - 10), F, 0.42, G, 1, cv2.LINE_AA)
 
