@@ -162,6 +162,9 @@ class MiniFiFeed:
         self.placement = None      # (cores, nice) the agent's threads are held to, or None to leave it alone
         self.manifest = os.path.join(clips_dir, ".nanostream-links") if clips_dir else None
         self._prune_orphans()
+        # read here, not on the thread: its first pass walks all of meta/ first, and a
+        # clip that is ready before that walk ends must still wait on a running agent
+        self.agent["pid"] = self._agent_pid()
         threading.Thread(target=self._run, daemon=True).start()
 
     # --- the links this app made, across runs ---

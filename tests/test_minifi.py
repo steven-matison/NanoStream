@@ -88,6 +88,13 @@ def test_scan_and_draw(tmp_path):
     assert frame[-30:].any() and not frame[:600].any()  # drawn along the bottom only
 
 
+def test_the_agent_is_known_before_the_first_meta_walk(tmp_path, monkeypatch):
+    monkeypatch.setattr(MiniFiFeed, "_agent_pid", lambda self: 4242)
+    monkeypatch.setattr(MiniFiFeed, "_scan", lambda self: time.sleep(5))     # a cold walk of a full meta folder
+    feed, _, _, _ = make_feed(tmp_path)
+    assert feed.agent["pid"] == 4242
+
+
 def test_place_holds_every_thread(tmp_path):
     import subprocess
     import time as _t
